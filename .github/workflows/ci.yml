@@ -34,14 +34,24 @@ jobs:
             build "$kind" before cold baseline.Dockerfile
             build "$kind" after cold Dockerfile
           done
-          printf '\n' >> packages/core/src/index.ts
+          for trial in 1 2 3; do
+            printf '\n' >> packages/core/src/index.ts
+            for kind in backend backup; do
+              if (( trial % 2 )); then
+                build "$kind" before "source-only-$trial" baseline.Dockerfile
+                build "$kind" after "source-only-$trial" Dockerfile
+              else
+                build "$kind" after "source-only-$trial" Dockerfile
+                build "$kind" before "source-only-$trial" baseline.Dockerfile
+              fi
+            done
+          done
           for kind in backend backup; do
-            build "$kind" before source-only baseline.Dockerfile
-            build "$kind" after source-only Dockerfile
             for variant in before after; do
               tag="bench-$kind-$variant"
               docker image inspect --format '{{json .Config}}' "$tag" > "$RUNNER_TEMP/$kind-$variant-config.json"
               docker run --rm --network none --entrypoint sh "$tag" -ec '
+                ./node_modules/.bin/tsx --version
                 node --import tsx --input-type=module -e "await import(\"./packages/core/src/index.ts\")"
                 if [ -d /app/deploy/backend ]; then
                   test -s /app/packages/mcp/src/pages/generated/connector.css
@@ -53,11 +63,13 @@ jobs:
               '
               docker run --rm --network none --entrypoint sh "$tag" -ec '
                 cd /app
-                find . -type f ! -path "./node_modules/.modules.yaml" ! -path "./node_modules/.pnpm/lock.yaml" -print0 |
+                find . -type f ! -path "./node_modules/.modules.yaml" ! -path "./node_modules/.pnpm/lock.yaml" ! -path "./node_modules/.pnpm-workspace-state-v1.json" ! -path "*/node_modules/.bin/*" -print0 |
                   sort -z | xargs -0 sha256sum
               ' > "$RUNNER_TEMP/$kind-$variant-files.txt"
+              docker run --rm --network none --entrypoint sh "$tag" -ec 'cd /app; find . -type l -printf "%p %l\n" | sort' > "$RUNNER_TEMP/$kind-$variant-links.txt"
               docker image inspect --format "IMAGE $kind $variant {{.Size}}" "$tag"
             done
             diff -u "$RUNNER_TEMP/$kind-before-config.json" "$RUNNER_TEMP/$kind-after-config.json"
             diff -u "$RUNNER_TEMP/$kind-before-files.txt" "$RUNNER_TEMP/$kind-after-files.txt"
+            diff -u "$RUNNER_TEMP/$kind-before-links.txt" "$RUNNER_TEMP/$kind-after-links.txt"
           done
