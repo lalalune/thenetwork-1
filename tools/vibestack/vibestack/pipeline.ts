@@ -61,7 +61,7 @@ export function nextStep(results: Result[]): string {
 }
 
 /** Take the project's lock for one check, accept or gen at a time; returns what releases it. A lock left by a process that has ended is taken over. */
-function lockProject(root: string): () => void {
+export function lockProject(root: string): () => void {
   const file = path.join(root, ".spec-cache", "lock");
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const alive = (pid: number) => {

@@ -12,6 +12,7 @@ __pycache__/
 .wrangler/
 .dev.vars
 /gen/
+/.gen-publication-*/
 .spec-cache/
 .studio/
 .cache/

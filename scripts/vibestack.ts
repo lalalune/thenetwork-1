@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Model } from "../tools/vibestack/vibestack/gen.ts";
+import { publishGeneratedTree } from "../tools/vibestack/vibestack/publish.ts";
 import { scanSpec } from "../tools/vibestack/vibestack/scan.ts";
 
 export const root = resolve(import.meta.dirname, "..");
@@ -312,11 +313,19 @@ async function main([command, ...args]: string[]) {
       watcher?.close();
     }
     if (code !== 0 || studio || command === "watch") return code;
-    assertUnchanged(files);
-    if (command === "gen" && existsSync(join(project, "gen"))) {
-      rmSync(join(root, "gen"), { recursive: true, force: true });
-      cpSync(join(project, "gen"), join(root, "gen"), { recursive: true });
+    if (command === "gen") {
+      const { lockProject } = await import("../tools/vibestack/vibestack/pipeline.ts");
+      const release = lockProject(root);
+      try {
+        assertUnchanged(files);
+        const generated = join(project, "gen");
+        if (existsSync(generated)) publishGeneratedTree(generated, join(root, "gen"));
+      } finally {
+        release();
+      }
+      return 0;
     }
+    assertUnchanged(files);
     if (command === "accept") {
       const ledger = join(project, "spec/lock.json");
       if (existsSync(ledger)) cpSync(ledger, join(root, "spec/lock.json"));
