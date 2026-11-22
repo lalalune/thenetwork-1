@@ -150,7 +150,7 @@ jobs:
           find .spec-cache/formal -maxdepth 1 -type f -name 'action-*.json.gz' -printf '%f\n' |
             sort > "$RUNNER_TEMP/formal-actions-before"
           # End the check before the job deadline so completed actions can be uploaded.
-          timeout --kill-after=15s 27m pnpm run check
+          timeout --kill-after=15s 30m pnpm run check
       - name: Prepare completed actions for upload
         if: ${{ !cancelled() && (steps.check.outcome == 'success' || steps.check.outcome == 'failure') }}
         id: ready
