@@ -52,6 +52,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm run spec:setup
       - name: Run Network formal validation from an empty cache
+        shell: bash
         run: /usr/bin/time -p pnpm run check --json | tee formal-check.jsonl
       - name: Print stage counts
         if: always()
