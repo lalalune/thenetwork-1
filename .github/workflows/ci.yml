@@ -13,13 +13,13 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           persist-credentials: false
       - name: Measure cold and source-only rebuilds
         shell: bash
         run: |
           for kind in backend backup; do
-            git show "HEAD~2:deploy/$kind/Dockerfile" > "deploy/$kind/baseline.Dockerfile"
+            git show "f662eda055609c9420b8c3da23fa431d472fe893:deploy/$kind/Dockerfile" > "deploy/$kind/baseline.Dockerfile"
             cp "deploy/$kind/Dockerfile.dockerignore" "deploy/$kind/baseline.Dockerfile.dockerignore"
           done
           build() {
