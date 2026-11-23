@@ -8,7 +8,7 @@ A member needs staff review before contact and control over when The Network mak
 
 Check review and deadlines, participant answers, name disclosure, STOP, cancellation, and the pause after unanswered invitations. The model defines the checks in `safety`, the reachable states in `witness_*`, and the replay traces in `run` definitions.
 
-After an ambiguous answer to a timed offer, the reply slot keeps a time choice open until the member makes an offered choice, declines, or asks for other times. The reply oracle distinguishes a timed ambiguity and an explicit current choice. The [probe reply rules](../probeReply.md) and signed booking tests check the exact offered keys.
+After an ambiguous answer to a timed offer, the reply slot keeps a time choice open until the member makes an offered choice, declines, or asks for other times. The reply oracle distinguishes a timed ambiguity and an explicit current choice. The [probe reply rules](../probeReply.md) and signed booking tests check the exact offered keys. The live service upgrades an older timed reply slot with `clarified` and no stored mode on its first non-resolving reply. The model starts with current-format slots and records `timeChoice: false` for a generic clarification.
 
 Production uses the generated [opportunity lifecycle](../opportunityLifecycle.md), [probe dispatch](../probeDispatch.md), [review deadline rule](../reviewDeadline.md), and [meeting confirmation and attendance settlement](../meetingSettlement.md). The Network shell keeps the roster, persisted statuses, channel effects, and attendance records. The [repeat encounter rules](../repeatEncounter.md) cover a new review after two private responses to the same completed meeting.
 
