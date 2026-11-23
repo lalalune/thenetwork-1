@@ -67,3 +67,4 @@ jobs:
           restore-keys: |
             scope-595-v1-generation-
       - run: test "$(cat probe/marker)" = generation
+# This revision seeds the pull request cache scope.
