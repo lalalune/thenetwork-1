@@ -1,0 +1,78 @@
+name: Qualify merged develop with Chromium
+
+on:
+  push:
+    branches:
+      - codex/qualify-3fb387ec-chromium
+
+permissions:
+  contents: read
+
+env:
+  SURPLUS_API_KEY: ""
+  OPENAI_API_KEY: ""
+
+jobs:
+  chromium:
+    # The integration suite (real Postgres, real HTTP servers, several packages together, the full
+    # service; the security files are part of it: platform row-level security and composite keys, CSRF
+    # and enumeration limits, MCP OAuth PKCE, the backend's "two logins" RLS check) and the e2e suite
+    # (tests/e2e). Sends are dry-run and OTP providers are fakes: nothing leaves the runner.
+    name: Chromium end-to-end
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      # The dev Postgres port (54339). The test helpers create one database per test process.
+      postgres:
+        image: postgres:16@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
+        env:
+          POSTGRES_USER: runner
+          POSTGRES_DB: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 54339:5432
+        options: >-
+          --health-cmd "pg_isready -U runner"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      # Postgres suites must run, not skip: the check step below fails the job without Postgres.
+      REQUIRE_PG: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+      - run: npm install --global corepack@0.35.0 && corepack enable pnpm
+      - name: Put the Postgres client tools on PATH
+        # The test helpers call initdb, pg_isready and pg_ctl (packages/observatory/db/dev-pg.ts).
+        run: |
+          bin="$(find /usr/lib/postgresql -mindepth 2 -maxdepth 2 -type d -name bin | sort -V | tail -n 1)"
+          test -x "$bin/pg_ctl"
+          echo "$bin" >> "$GITHUB_PATH"
+      - name: Install
+        run: pnpm install --frozen-lockfile
+        timeout-minutes: 5
+      - name: Initialize integration Postgres
+        # Install cluster-wide roles once before workers migrate their separate databases.
+        run: |
+          pg_isready -h localhost -p 54339
+          node --import tsx scripts/require-pg.ts
+          node --import tsx packages/observatory/db/dev-pg.ts up
+      - name: Generate design and connector CSS
+        run: pnpm run connector:css
+        timeout-minutes: 5
+      - name: Install pinned Chromium runner outside the source tree
+        run: |
+          npm install --prefix "$RUNNER_TEMP/network-browser" --no-package-lock --no-audit --no-fund playwright@1.65.0
+          node "$RUNNER_TEMP/network-browser/node_modules/playwright/cli.js" install --with-deps chromium
+        timeout-minutes: 10
+      - name: Verify application and browser flows over signed loopback
+        run: |
+          test -z "${LIVE_TESTS:-}"
+          export PLAYWRIGHT_MODULE="$RUNNER_TEMP/network-browser/node_modules/playwright/index.mjs"
+          node node_modules/vitest/vitest.mjs run --project e2e --maxWorkers=2
+        timeout-minutes: 15
