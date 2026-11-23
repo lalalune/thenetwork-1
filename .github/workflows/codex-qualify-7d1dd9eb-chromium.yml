@@ -80,5 +80,9 @@ jobs:
         env:
           NETWORK_RETRY_RECONCILIATION_TEST: '1'
         run: |
+          retry_db=network_retry_$(openssl rand -hex 8)
+          createdb -h 127.0.0.1 -p 54339 -U runner "$retry_db"
+          trap 'dropdb -h 127.0.0.1 -p 54339 -U runner "$retry_db"' EXIT
+          export NETWORK_RETRY_POSTGRES_URL="postgres://runner@127.0.0.1:54339/$retry_db"
           node node_modules/vitest/vitest.mjs run --project integration --maxWorkers=1 packages/network/test/profile-cleanup-reconciliation.postgres.test.ts
         timeout-minutes: 10
