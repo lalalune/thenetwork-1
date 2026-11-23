@@ -301,8 +301,8 @@ async function checkLocked(root: string, accept: false | "reviews" | "unproved",
   const valid: Spec[] = [];
   const models: Model[] = [];
   const machines = new Map<string, Machine>();
-  /** Each spec's simulation starts once its model is generated; they run at once and are reported in the specs' order. */
   const simulations: { spec: Spec; model: Model; domain: any; simulated: Promise<Simulation> }[] = [];
+  const pending: { weight: number; run: () => Promise<void> }[] = [];
 
   for await (const { spec, model, error } of generating(memory, specs)) {
     let domain: any;
@@ -321,17 +321,30 @@ async function checkLocked(root: string, accept: false | "reviews" | "unproved",
     const parts = [[model.transitions.length, "transitions"], [model.always.length, "always"], [model.steps.length, "step"], [model.leadsTo.length, "leadsTo"], [model.sometimes.length, "sometimes"], [model.laws.length, "laws"], [model.opaques.length, "opaque"]];
     report({ ok: true, stage: "model", summary: `${spec.file}: ${parts.filter(([n]) => n).map((p) => p.join(" ")).join(", ") || "definitions only"}`, detail: "", where: spec.file });
     if (!model.stateType && !model.laws.length && !model.evals.length) continue;
-    const simulated = simulation(memory, spec, specs, model, domain, seed);
-    simulated.catch(() => {}); // a failure is reported in its turn, not as an unhandled rejection
+    const simulated = new Promise<Simulation>((resolve, reject) => {
+      pending.push({
+        weight: model.transitions.length + model.sometimes.length,
+        run: () => simulation(memory, spec, specs, model, domain, seed).then(resolve, reject),
+      });
+    });
+    simulated.catch(() => {}); // A failure is reported in spec order below.
     simulations.push({ spec, model, domain, simulated });
   }
+
+  // A model can use several tool slots and its guard searches depend on the goal searches.
+  // Start models with more transitions and goals early, keeping other models ready to fill idle slots.
+  pending.sort((a, b) => b.weight - a.weight);
+  const simulateNext = async () => {
+    for (let next; (next = pending.shift());) await next.run();
+  };
+  const workers = Array.from({ length: Math.min(pending.length, os.availableParallelism()) }, simulateNext);
   /** A result about an owner's code names its package; the root's own reads as it always has. */
   const within = (dir: string, r: Result): Result => (dir ? { ...r, summary: `${dir.slice(0, -1)}: ${r.summary}`, where: dir.slice(0, -1) } : r);
   const result = ([ok, stage, summary, detail = "", where]: Reported): Result => ({ ok, stage, summary, detail: ok ? "" : detail, ...(where ? { where } : {}) });
   const restates = "a stage above failed, and their failures would only restate it";
   let ledger: Record<string, Accepted> | undefined;
   // None is left writing into gen/ when the check goes on or returns.
-  const running: Promise<unknown>[] = simulations.map((s) => s.simulated);
+  const running: Promise<unknown>[] = [...workers];
   try {
     mirrorGen(root, specs);
     // The typechecks and the proofs read only what generation wrote, so they run while the simulations do; after a
