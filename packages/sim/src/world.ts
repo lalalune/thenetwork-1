@@ -153,8 +153,8 @@ export class World {
     this.opts.onRecord?.(full);
   }
   private logMessage(m: SimMessage, bookingNoticeMeetingId?: string) {
-    this.rec({ type: "message", msg: { id: m.id, ts: m.ts, direction: m.direction, memberId: m.memberId, body: m.body, status: m.status, keyword: m.keyword, system: m.system, meta: m.meta as any },
-      ...(m.direction === "inbound" && m.meta?.inReplyTo ? { replyToMessageId: m.meta.inReplyTo } : {}),
+    this.rec({ type: "message", msg: { id: m.id, ts: m.ts, direction: m.direction, memberId: m.memberId, body: m.body, status: m.status, keyword: m.keyword, system: m.system, meta: m.meta as any,
+      ...(m.direction === "inbound" && m.meta?.inReplyTo ? { replyToMessageId: m.meta.inReplyTo } : {}) },
       ...(bookingNoticeMeetingId ? { bookingNoticeMeetingId } : {}) });
   }
 

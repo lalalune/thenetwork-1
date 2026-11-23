@@ -443,8 +443,8 @@ export async function probeDeclineReceiptGate(b: Block): Promise<void> {
       });
       const result = await world.run();
       expect(reveals.length).toBe(2);
-      expect(result.metrics.invariants.examples.filter(x => x.rule === "decliner_exposed").map(x => x.detail.split(" ")[0]))
-        .toEqual(mode === "ignored" ? [] : [reveals[1]]);
+      const exposed = result.metrics.invariants.examples.filter(x => x.rule === "decliner_exposed").map(x => x.detail.split(" ")[0]);
+      expect({ mode, exposed }).toEqual({ mode, exposed: mode === "ignored" ? [] : [reveals[1]] });
       const reply = result.records.find((r): r is Msg => r.type === "message" && r.msg.direction === "inbound"
         && r.msg.body === (mode === "linked raw" ? "No thanks." : refusal));
       expect(reply?.msg.replyToMessageId).toEqual(mode === "delivered" || mode === "structured" || mode === "linked raw" ? probeId : undefined);
