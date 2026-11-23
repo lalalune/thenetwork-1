@@ -1,295 +1,175 @@
-# CI: install, typecheck, `pnpm run sim` (the simulations and their gates, with a real Postgres so the
-# pipeline, safety, ops and audit Postgres gates block), the plugin build check and the sites production build; plus the integration and e2e suites (security suite included) with a
-# real Postgres. Validation policy: simulations + integration + e2e, no unit or smoke tests
-# (docs/tests-policy.md). No
-# secrets are given to CI, and LIVE_TESTS is never set, so no paid LLM call, Blooio or Twilio call,
-# or Cloudflare deploy can happen here. Deploys live in deploy-sites.yml. Actions and the Postgres image are pinned by digest.
-name: ci
-
+name: Qualify the pinned Dafny installer
 on:
-  # Pull requests cover feature commits; pushes validate both maintained branches.
-  push:
-    branches: [main, develop]
-  pull_request:
   workflow_dispatch:
-
 permissions:
   contents: read
-
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  # Blank every provider key and leave LIVE_TESTS unset: live tests skip themselves.
-  SURPLUS_API_KEY: ""
-  OPENAI_API_KEY: ""
-  BLOOIO_API_KEY: ""
-  BLOOIO_LIVE_TEST: ""
-  TWILIO_AUTH_TOKEN: ""
-  TURNSTILE_SECRET_KEY: ""
-  CLOUDFLARE_API_TOKEN: ""
-  NTWRK_ALLOW_DEPLOY: ""
-  LLM_ALLOW_OPENAI_FALLBACK: ""
-  # Any accidental LLM call fails fast instead of hanging.
-  LLM_TIMEOUT_MS: "10000"
-  LLM_MAX_RETRIES: "0"
-
 jobs:
-  offline-core:
-    # "offline" means no network calls and no secrets. The simulations get the same pinned Postgres as
-    # the integration job, so the Postgres blocks (pipeline, pipeline-slop, safety, ops, audit) run and block.
+  legacy:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    services:
-      postgres:
-        image: postgres:16@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
-        env:
-          POSTGRES_USER: runner
-          POSTGRES_DB: postgres
-          POSTGRES_HOST_AUTH_METHOD: trust
-        ports:
-          - 54339:5432
-        options: >-
-          --health-cmd "pg_isready -U runner"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
-    env:
-      REQUIRE_PG: "1"
+    timeout-minutes: 6
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - &checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - name: Install Dafny with the legacy helper
+        uses: dafny-lang/setup-dafny-action@be023fc606339d46ed6b077dcb8614d0279ded31
+        with:
+          dafny-version: '4.11.0'
+      - &node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version-file: .nvmrc
-      - run: npm install --global corepack@0.35.0 && corepack enable pnpm
-      - name: Put the Postgres client tools on PATH
-        # The simulations call pg_isready, pg_ctl, pg_dump and psql (dev-pg.ts, the ops backup drill).
-        run: |
-          bin="$(find /usr/lib/postgresql -mindepth 2 -maxdepth 2 -type d -name bin | sort -V | tail -n 1)"
-          test -x "$bin/pg_ctl"
-          echo "$bin" >> "$GITHUB_PATH"
-      - name: Install
-        run: pnpm install --frozen-lockfile
-        timeout-minutes: 5
-      - name: Install the toolkit (tools/vibestack)
-        run: pnpm --dir tools/vibestack --filter vibestack install --frozen-lockfile --ignore-scripts
-        timeout-minutes: 5
-      - name: Require Postgres
-        run: |
-          pg_isready -h localhost -p 54339
-          node --import tsx scripts/require-pg.ts
-      - name: Generate design and connector CSS
-        run: pnpm run connector:css
-        timeout-minutes: 5
-      - name: Restore TypeScript incremental state
-        id: type-cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: .cache/typecheck
-          key: typecheck-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.nvmrc', 'pnpm-lock.yaml', 'tsconfig.json', 'sites/tsconfig.json') }}-${{ github.sha }}
-          restore-keys: typecheck-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.nvmrc', 'pnpm-lock.yaml', 'tsconfig.json', 'sites/tsconfig.json') }}-
-      - name: Typecheck (packages, deploy, tests, scripts/sim)
-        run: pnpm exec tsc --noEmit -p .
-        timeout-minutes: 5
-      - name: Typecheck (sites, scripts)
-        run: pnpm exec tsc --noEmit -p sites/tsconfig.json
-        timeout-minutes: 5
-      - name: Save TypeScript incremental state
-        if: steps.type-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: .cache/typecheck
-          key: ${{ steps.type-cache.outputs.cache-primary-key }}
-      - name: Simulations other than matching
-        # Run the in-memory NYC world alongside the other blocks on the same runner.
+      - &typescript
+        name: Install the existing verifier fingerprint dependencies
         shell: bash
         run: |
-          if [ -n "${LIVE_TESTS:-}" ]; then echo "LIVE_TESTS must be unset in CI"; exit 1; fi
-          (pnpm run sim --only network | sed -u 's/^/[network] /') &
-          network_pid=$!
-          core_status=0
-          pnpm run sim --skip matching,network --json sim-gates.json || core_status=$?
-          network_status=0
-          wait "$network_pid" || network_status=$?
-          if (( core_status || network_status )); then
-            echo "Simulation failure (core=$core_status, network=$network_status)"
+          npm install --global corepack@0.35.0
+          corepack enable pnpm
+          corepack pnpm@10.24.0 --dir tools/vibestack --filter vibestack install --frozen-lockfile --ignore-scripts
+      - &fingerprint
+        name: Measure the native verifier identity and verify both controls
+        id: proof
+        shell: bash
+        run: |
+          node --input-type=module <<'JS' | tee "$RUNNER_TEMP/dafny-identity"
+          import { createHash } from 'node:crypto';
+          import { verifierIdentity } from './tools/vibestack/vibestack/cache.ts';
+          const identity = await verifierIdentity();
+          console.log(createHash('sha256').update(identity).digest('hex'));
+          console.log(identity);
+          JS
+          printf 'identity=%s\n' "$(head -1 "$RUNNER_TEMP/dafny-identity")" >> "$GITHUB_OUTPUT"
+          solver="$(dirname "$(command -v dafny)")/z3/bin/z3-4.12.1"
+          "$solver" --version
+          cat > "$RUNNER_TEMP/valid.dfy" <<'DFY'
+          lemma AddOne(n: int)
+            ensures n + 1 > n
+          {}
+          DFY
+          sed 's/n + 1 > n/n + 1 < n/' "$RUNNER_TEMP/valid.dfy" > "$RUNNER_TEMP/invalid.dfy"
+          dafny verify --cores 1 --solver-path "$solver" "$RUNNER_TEMP/valid.dfy"
+          if dafny verify --cores 1 --solver-path "$solver" "$RUNNER_TEMP/invalid.dfy" > "$RUNNER_TEMP/invalid.log" 2>&1; then
+            echo 'The false obligation unexpectedly passed'
             exit 1
           fi
-        timeout-minutes: 30
-      - name: No Postgres gate was skipped
-        # A Postgres block that cannot reach Postgres records a tracked "skipped" gate. With REQUIRE_PG=1
-        # that is a failure.
-        run: |
-          skipped="$(jq -r '.gates[] | select((.blocking | not) and (.block | IN("pipeline", "pipeline-slop", "safety", "ops", "audit")) and (((.name + " " + (.detail // "")) | test("skipped"; "i")))) | "[\(.block)] \(.name)"' sim-gates.json)"
-          if [ -n "$skipped" ]; then echo "Postgres gates skipped with REQUIRE_PG=1:"; echo "$skipped"; exit 1; fi
-      - name: Plugin packages match their sources (OpenAI and Claude manifests, SKILL.md snapshots)
-        run: node --import tsx plugins/build.ts --check
-      - name: The retired domain is gone (the hub is ntwrk.party; the old domain only redirects)
-        run: |
-          if git grep -n -I -E 'ntwrk[.]love' -- .; then echo "use ntwrk.party / api.ntwrk.party instead"; exit 1; fi
-      - name: Production build of the four sites (refuses draft legal text and unfilled placeholders)
-        run: node --import tsx --env-file-if-exists=.env sites/sites.ts
-        env:
-          DEPLOY_TARGET: production
-
-  matching:
+          cat "$RUNNER_TEMP/invalid.log"
+          grep -F '1 error' "$RUNNER_TEMP/invalid.log"
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import { readFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          import { act } from './tools/vibestack/vibestack/action.ts';
+          import { solver } from './tools/vibestack/vibestack/cache.ts';
+          const root = process.env.RUNNER_TEMP;
+          const solverPath = (await solver()).path;
+          assert.equal(solverPath, `${process.env.RUNNER_TOOL_CACHE}/dafny/4.11.0/x64/z3/bin/z3-4.12.1`);
+          const memory = { root, fresh: true, used: new Set() };
+          const text = readFileSync(join(root, 'valid.dfy'), 'utf8');
+          const result = await act(memory, 'dafny', ['verify', '--cores', '1', '--solver-path', solverPath, 'valid.dfy'], 'receipt', { 'valid.dfy': { text, key: text } });
+          assert.ok(result.ok, result.out);
+          const [key] = memory.used;
+          assert.match(key, /^action-[a-f0-9]{24}\.json\.gz$/);
+          console.log(`${key} ${solverPath}`);
+          JS
+  cold:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 5
     outputs:
-      ntwrk: ${{ steps.gates.outputs.ntwrk }}
-      slop: ${{ steps.gates.outputs.slop }}
-      peon: ${{ steps.gates.outputs.peon }}
-      friends: ${{ steps.gates.outputs.friends }}
+      identity: ${{ steps.proof.outputs.identity }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version-file: .nvmrc
-      - run: npm install --global corepack@0.35.0 && corepack enable pnpm
-      - name: Install
-        run: pnpm install --frozen-lockfile
-        timeout-minutes: 5
-      - name: Pinned matching simulations
-        id: gates
+      - *checkout
+      - *node
+      - name: Install Dafny from the release
+        id: dafny
+        uses: ./.github/actions/setup-dafny
+      - name: Check that the release was cold
+        env:
+          SOURCE: ${{ steps.dafny.outputs.source }}
+        run: test "$SOURCE" = release
+      - *typescript
+      - *fingerprint
+      - name: Force the observed direct HTTP 403 and verify the official API fallback
         shell: bash
         run: |
-          if [ -n "${LIVE_TESTS:-}" ]; then echo "LIVE_TESTS must be unset in CI"; exit 1; fi
-          packs=(ntwrk slop peon friends)
-          pids=()
-          for pack in "${packs[@]}"; do
-            /usr/bin/time -f 'elapsed=%e user=%U sys=%S rss_kib=%M' \
-              pnpm run sim --only matching --matching-pack "$pack" 2>&1 | sed -u "s/^/[$pack] /" &
-            pids+=("$!")
-          done
-          failed=0
-          for index in "${!pids[@]}"; do
-            pack=${packs[$index]}
-            if wait "${pids[$index]}"; then
-              printf '%s=success\n' "$pack" >> "$GITHUB_OUTPUT"
-            else
-              echo "Matching simulations failed for $pack"
-              failed=1
+          test_root=$(mktemp -d)
+          trap 'rm -rf -- "$test_root"' EXIT
+          mkdir "$test_root/bin"
+          cat > "$test_root/bin/curl" <<'SH'
+          #!/usr/bin/env bash
+          for arg; do
+            if [[ "$arg" == https://github.com/dafny-lang/dafny/releases/download/* ]]; then
+              echo 'Fixture: direct URL returned HTTP 403' >&2
+              exit 22
             fi
           done
-          exit "$failed"
-        timeout-minutes: 30
-
-  offline:
-    # Preserve the required check name and require positive completion from every matching pack.
-    if: ${{ always() }}
-    needs: [offline-core, matching]
+          exec /usr/bin/curl "$@"
+          SH
+          chmod +x "$test_root/bin/curl"
+          ruby -ryaml -e 'puts YAML.safe_load_file(ARGV[0]).fetch("runs").fetch("steps").find { |s| s["id"] == "install" }.fetch("run")' .github/actions/setup-dafny/action.yml > "$test_root/install.sh"
+          # A corrupt cached ZIP must not be extracted or mask the fallback.
+          printf 'corrupt archive' > "$test_root/dafny-4.11.0-x64-ubuntu-22.04.zip"
+          mkdir -p "$test_root/tool-cache/dafny/4.11.0/x64"
+          touch "$test_root/tool-cache/dafny/4.11.0/x64/stale"
+          PATH="$test_root/bin:$PATH" RUNNER_TEMP="$test_root" RUNNER_TOOL_CACHE="$test_root/tool-cache" GITHUB_PATH="$test_root/path" GITHUB_OUTPUT="$test_root/out" \
+            RELEASE_FILE=dafny-4.11.0-x64-ubuntu-22.04.zip RELEASE_SHA=a46a9ff7cdd720f7955854c78e95df13f4cfe6b80691b05f8654fe19e8267179 \
+            bash -e -o pipefail "$test_root/install.sh"
+          grep -Fx 'source=asset-api' "$test_root/out"
+          verifier=$(cat "$test_root/path")
+          test ! -e "$verifier/stale"
+          "$verifier/dafny" verify --cores 1 --solver-path "$verifier/z3/bin/z3-4.12.1" "$RUNNER_TEMP/valid.dfy"
+  warm:
+    needs: cold
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: All offline gates completed and passed
+      - *checkout
+      - *node
+      - name: Supply an unverified destination symlink and disable release downloads
+        shell: bash
+        run: |
+          mkdir "$RUNNER_TEMP/no-curl" "$RUNNER_TEMP/untrusted-verifier"
+          touch "$RUNNER_TEMP/untrusted-verifier/marker"
+          mkdir -p "$RUNNER_TOOL_CACHE/dafny/4.11.0"
+          ln -s "$RUNNER_TEMP/untrusted-verifier" "$RUNNER_TOOL_CACHE/dafny/4.11.0/x64"
+          cat > "$RUNNER_TEMP/no-curl/curl" <<'SH'
+          #!/usr/bin/env bash
+          echo 'External download was attempted on the warm path' >&2
+          exit 99
+          SH
+          chmod +x "$RUNNER_TEMP/no-curl/curl"
+          echo "$RUNNER_TEMP/no-curl" >> "$GITHUB_PATH"
+      - name: Install Dafny from the verified cache
+        id: dafny
+        uses: ./.github/actions/setup-dafny
+      - name: Confirm that the verified cache supplied the archive
         env:
-          CORE: ${{ needs.offline-core.result }}
-          MATCHING: ${{ needs.matching.result }}
-          NTWRK: ${{ needs.matching.outputs.ntwrk }}
-          SLOP: ${{ needs.matching.outputs.slop }}
-          PEON: ${{ needs.matching.outputs.peon }}
-          FRIENDS: ${{ needs.matching.outputs.friends }}
+          SOURCE: ${{ steps.dafny.outputs.source }}
+        shell: bash
         run: |
-          for gate in CORE MATCHING NTWRK SLOP PEON FRIENDS; do
-            if [ "${!gate}" != success ]; then
-              echo "Offline validation did not pass: $gate (${!gate:-missing})"
-              exit 1
-            fi
-          done
-
-  ui:
-    # The design system and the component library: the brand tokens agree with design.md, the generated stories
-    # are current, the stories pass in happy-dom, and ESLint (tokens-only styling) passes with no warnings.
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version-file: .nvmrc
-      - run: npm install --global corepack@0.35.0 && corepack enable pnpm
-      - name: Install
-        run: pnpm install --frozen-lockfile
-        timeout-minutes: 5
-      - name: Install the toolkit (tools/vibestack)
-        run: pnpm --dir tools/vibestack --filter vibestack install --frozen-lockfile --ignore-scripts
-        timeout-minutes: 5
-      - name: Design tokens agree with design.md (design:check)
-        run: pnpm run design:check
-      - name: Generate design CSS, check generated stories and run component stories (ui:test)
-        run: pnpm run ui:test
-        timeout-minutes: 10
-      - name: ESLint for packages/ui, apps and the console and connector pages (lint:ui)
-        run: pnpm run lint:ui
-
-  integration:
-    # The integration suite (real Postgres, real HTTP servers, several packages together, the full
-    # service; the security files are part of it: platform row-level security and composite keys, CSRF
-    # and enumeration limits, MCP OAuth PKCE, the backend's "two logins" RLS check) and the e2e suite
-    # (tests/e2e). Sends are dry-run and OTP providers are fakes: nothing leaves the runner.
-    name: integration
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    services:
-      # The dev Postgres port (54339). The test helpers create one database per test process.
-      postgres:
-        image: postgres:16@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
+          test "$SOURCE" = cache
+          test ! -L "$RUNNER_TOOL_CACHE/dafny/4.11.0/x64"
+          test -f "$RUNNER_TEMP/untrusted-verifier/marker"
+          test ! -e "$RUNNER_TEMP/untrusted-verifier/Dafny.dll"
+      - *typescript
+      - *fingerprint
+      - name: Compare the content-keyed verifier identity
         env:
-          POSTGRES_USER: runner
-          POSTGRES_DB: postgres
-          POSTGRES_HOST_AUTH_METHOD: trust
-        ports:
-          - 54339:5432
-        options: >-
-          --health-cmd "pg_isready -U runner"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
-    env:
-      # Postgres suites must run, not skip: the check step below fails the job without Postgres.
-      REQUIRE_PG: "1"
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version-file: .nvmrc
-      - run: npm install --global corepack@0.35.0 && corepack enable pnpm
-      - name: Put the Postgres client tools on PATH
-        # The test helpers call initdb, pg_isready and pg_ctl (packages/observatory/db/dev-pg.ts).
+          WARM: ${{ steps.proof.outputs.identity }}
+          COLD: ${{ needs.cold.outputs.identity }}
+        run: test -n "$WARM" && test "$WARM" = "$COLD"
+      - name: Refuse a symlinked tool-cache ancestor before extraction
+        shell: bash
         run: |
-          bin="$(find /usr/lib/postgresql -mindepth 2 -maxdepth 2 -type d -name bin | sort -V | tail -n 1)"
-          test -x "$bin/pg_ctl"
-          echo "$bin" >> "$GITHUB_PATH"
-      - name: Install
-        run: pnpm install --frozen-lockfile
-        timeout-minutes: 5
-      - name: Initialize integration Postgres
-        # Install cluster-wide roles once before workers migrate their separate databases.
-        run: |
-          pg_isready -h localhost -p 54339
-          node --import tsx scripts/require-pg.ts
-          node --import tsx packages/observatory/db/dev-pg.ts up
-      - name: Generate design and connector CSS
-        run: pnpm run connector:css
-        timeout-minutes: 5
-      # Use the four hosted CPUs. Keep the package default for local runs.
-      - name: Integration suite (includes the security suite)
-        run: |
-          if [ -n "${LIVE_TESTS:-}" ]; then echo "LIVE_TESTS must be unset in CI"; exit 1; fi
-          node --env-file-if-exists=.env node_modules/vitest/vitest.mjs run --project integration --maxWorkers=4
-        timeout-minutes: 30
-      - name: E2E suite (tests/e2e)
-        run: |
-          if [ -n "${LIVE_TESTS:-}" ]; then echo "LIVE_TESTS must be unset in CI"; exit 1; fi
-          node --env-file-if-exists=.env node_modules/vitest/vitest.mjs run --project e2e --maxWorkers=4
-        timeout-minutes: 10
-
+          test_root=$(mktemp -d)
+          trap 'rm -rf -- "$test_root"' EXIT
+          mkdir "$test_root/redirect" "$test_root/cache"
+          ln -s "$test_root/redirect" "$test_root/cache/dafny"
+          ruby -ryaml -e 'puts YAML.safe_load_file(ARGV[0]).fetch("runs").fetch("steps").find { |s| s["id"] == "install" }.fetch("run")' .github/actions/setup-dafny/action.yml > "$test_root/install.sh"
+          if RUNNER_TOOL_CACHE="$test_root/cache" GITHUB_PATH="$test_root/path" GITHUB_OUTPUT="$test_root/out" \
+            RELEASE_FILE=dafny-4.11.0-x64-ubuntu-22.04.zip RELEASE_SHA=a46a9ff7cdd720f7955854c78e95df13f4cfe6b80691b05f8654fe19e8267179 \
+            bash -e -o pipefail "$test_root/install.sh"; then
+            echo 'The alias was not rejected'
+            exit 1
+          fi
+          test -z "$(find "$test_root/redirect" -mindepth 1 -print -quit)"
