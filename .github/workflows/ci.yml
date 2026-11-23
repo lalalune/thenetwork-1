@@ -20,6 +20,13 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version-file: .nvmrc
+      - &typescript
+        name: Install the existing verifier fingerprint dependencies
+        shell: bash
+        run: |
+          npm install --global corepack@0.35.0
+          corepack enable pnpm
+          corepack pnpm@10.24.0 --dir tools/vibestack --filter vibestack install --frozen-lockfile --ignore-scripts
       - &fingerprint
         name: Measure the native verifier identity and verify both controls
         id: proof
@@ -63,6 +70,7 @@ jobs:
         env:
           SOURCE: ${{ steps.dafny.outputs.source }}
         run: test "$SOURCE" = release
+      - *typescript
       - *fingerprint
       - name: Force the observed direct HTTP 403 and verify the official API fallback
         shell: bash
@@ -115,6 +123,7 @@ jobs:
         env:
           SOURCE: ${{ steps.dafny.outputs.source }}
         run: test "$SOURCE" = cache
+      - *typescript
       - *fingerprint
       - name: Compare the content-keyed verifier identity
         env:
