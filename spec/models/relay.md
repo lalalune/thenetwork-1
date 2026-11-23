@@ -1157,6 +1157,7 @@ module relay {
       .then(selectPhoto).then(reviewPhoto(true)).then(photoRequest(false, false))
       .then(queueSend(PHOTO_ITEM)).then(resolvePhoto).then(fetchBytes(photo.dexp - 1))
       .fail()
+  val witness_ci_negative_control = true
 }
 ```
 
