@@ -922,6 +922,19 @@ function probeChoiceAuthored(prefix: string): boolean {
   return !quoteStillOpen(prefix) && !describesAnotherPerson(prefix.split(/[.!?\n]/).at(-1)!);
 }
 
+const RECURRING_PROBE_TIME = new RegExp(
+  String.raw`\b(?:${DAY_NAMES.map(([day]) => `${day.toLowerCase()}s`).join("|")}|weekends|weekdays|weeknights|mornings|afternoons|evenings|nights)\b`,
+);
+
+const PROBE_AVAILABILITY_SUBJECT = /\b([a-z][a-z'-]*)\s+(?:can|could|would|(?:is|are)\s+(?:free|available)|prefers?)\b/g;
+
+function probeTimeIsRecurring(text: string, at: number, end: number): boolean {
+  return RECURRING_PROBE_TIME.test(text.slice(at, end))
+    || /\b(?:usually|normally|generally|typically|weekly|every (?:other )?week)\b/.test(clauseAt(text, at, end - at))
+    || /\b(?:every|each|most)\s+$/.test(text.slice(0, at));
+}
+
+
 function timeMentions(text: string, recoverTrailingPair = false): TimeMention[] {
   const days: TimeMention[] = DAY_WORDS.flatMap(([rx, day]) => [...text.matchAll(rx)].map(m => ({ at: m.index!, end: m.index! + m[0].length, day })));
   if (recoverTrailingPair) {
@@ -1108,7 +1121,12 @@ export function parseProbeReply(body: string, options: readonly TimeOption[] = [
   const pos = new Set<string>(), neg = new Set<string>(), strong = new Set<string>();
   const individual = new Set<string>(), grouped = new Set<string>();
   const pickedClauses = new Set<string>(), refusedClauses = new Set<string>();
-  const memberChoiceAt = (at: number) => !clarifiedTimes || probeChoiceAuthored(t.slice(0, at));
+  const memberChoiceAt = (at: number) => {
+    if (!clarifiedTimes) return true;
+    const prefix = t.slice(0, at);
+    const subject = [...prefix.split(/[.!?\n]/).at(-1)!.matchAll(PROBE_AVAILABILITY_SUBJECT)].at(-1)?.[1];
+    return probeChoiceAuthored(prefix) && (subject === undefined || /^(?:i|we|it|this|that)$/.test(subject));
+  };
   const refuse = (keys: readonly string[], clause?: string) => {
     for (const key of keys) neg.add(key);
     if (clause !== undefined) refusedClauses.add(clause);
@@ -1171,6 +1189,7 @@ export function parseProbeReply(body: string, options: readonly TimeOption[] = [
       weekend: day === "Saturday" || day === "Sunday", minute, part: minute === undefined ? undefined : partOf(minute) };
   });
   for (const m of timeMentions(t, !explicitTimesOnly || clarifiedTimes)) {
+    if (clarifiedTimes && probeTimeIsRecurring(t, m.at, m.end)) continue;
     if (!memberChoiceAt(m.at)) continue;
     if (partExclusion && m.at >= partExclusion.index && m.at < partExclusionEnd) continue;
     const matching = offered.filter(o => (!m.day || o.day === m.day) && (m.minute === undefined || o.minute === m.minute)
