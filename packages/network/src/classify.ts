@@ -1010,6 +1010,9 @@ const PROBE_CLAUSE_BOUNDARY = /([.,;!?\n]|\b(?:but|though|however)\b)/;
 const CURRENT_PROBE_CHOICE = /^\s+(?:works?|(?:will|would) work|(?:is|would be) (?:good|fine|great|best))(?: for me)?(?: (?:please|thanks))?\s*$/;
 const CURRENT_PROBE_REFUSAL = /^(?:no(?: (?:thanks|thank you))?|(?:neither|none of (?:those|these|them)(?: times| options)?) works?(?: for me)?)$/;
 const EXPLICIT_ALTERNATIVE_RANGE = /(?:^|[.,;!]\s*)\s*(?:any day|any ?time|anything|everything|all|whichever)\s+(?:but|except|other than|apart from|aside from|excluding|barring)\b/;
+const CLARIFIED_ALTERNATIVE_RANGE = new RegExp(
+  String.raw`^\s*(?:(?:yes|yeah|yep|sure|ok(?:ay)?)[,\s]+)?(?:${NAMED_EXCLUSION_RANGE}|(?:any|every|each) (?:morning|afternoon|evening|night)s?)\s+(?:but|${NAMED_TIME_EXCLUSION})\s+(?:(?:on|this|that)\s+)*$`,
+);
 
 function isIndependentProbeAnswer(clause: string): boolean {
   return CURRENT_PROBE_REFUSAL.test(clause.trim()) || independentOrdinalChoices(clause).length > 0 || timeMentions(clause).some(mention =>
@@ -1173,7 +1176,7 @@ export function parseProbeReply(body: string, options: readonly TimeOption[] = [
     individual.add(key);
   }
   const ordinalMissing = ordinalKeys.some(key => key === undefined);
-  let namedExclusion = false, refusedGroup = false;
+  let namedExclusion = false, refusedGroup = false, explicitAlternative = false;
   let contradictedExclusion = false;
   const namedExcluded = new Set<string>();
   const partExclusion = DAYPART_EXCLUSION.exec(t);
@@ -1189,18 +1192,22 @@ export function parseProbeReply(body: string, options: readonly TimeOption[] = [
       weekend: day === "Saturday" || day === "Sunday", minute, part: minute === undefined ? undefined : partOf(minute) };
   });
   for (const m of timeMentions(t, !explicitTimesOnly || clarifiedTimes)) {
-    if (clarifiedTimes && probeTimeIsRecurring(t, m.at, m.end)) continue;
     if (!memberChoiceAt(m.at)) continue;
     if (partExclusion && m.at >= partExclusion.index && m.at < partExclusionEnd) continue;
+    const prefix = t.slice(0, m.at);
+    const exclusion = m.at === partExclusionEnd || NAMED_EXCLUSION.test(prefix);
+    const currentAlternative = clarifiedTimes && exclusion && CLARIFIED_ALTERNATIVE_RANGE.test(prefix)
+      && CURRENT_PROBE_CHOICE.test(t.slice(m.end).replace(/[.!]\s*$/, ""));
+    if (clarifiedTimes && !currentAlternative && probeTimeIsRecurring(t, m.at, m.end)) continue;
     const matching = offered.filter(o => (!m.day || o.day === m.day) && (m.minute === undefined || o.minute === m.minute)
       && (m.group ? o.knownDay && probeGroupIncludes(m.group === "weekend", o.weekend,
         m.nightsOnly === true, o.part === "evening", !!m.part, m.part === o.part) : !m.part || o.part === m.part)).map(o => o.key);
-    const exclusion = m.at === partExclusionEnd || NAMED_EXCLUSION.test(t.slice(0, m.at));
     const refused = exclusion || negatedAt(t, m.at, m.end - m.at);
     if (m.group && (quoteStillOpen(t.slice(0, m.at)) || describesAnotherPerson(clauseAt(t, m.at, m.end - m.at)))) {
       unresolved.push(m);
     } else if (refused) {
       namedExclusion ||= exclusion;
+      explicitAlternative ||= currentAlternative && matching.length > 0;
       contradictedExclusion ||= exclusion && NEG_AFTER.test(t.slice(m.end));
       refusedGroup ||= !!m.group;
       refuse(matching, exclusion ? undefined : clauseAt(t, m.at, m.end - m.at));
@@ -1288,8 +1295,9 @@ export function parseProbeReply(body: string, options: readonly TimeOption[] = [
     return open.length ? explicitYes(open) : { ...unclear, why: "slot" };
   }
   if (unresolved.length || pos.size && !strong.size && c.answer !== "yes") return { ...unclear, why: "slot" };
-  if (!explicitTimesOnly && namedExclusion && open.length && (!past || EXPLICIT_ALTERNATIVE_RANGE.test(t))) {
-    return { answer: "yes", keys: open, why: c.why };
+  if (namedExclusion && open.length
+    && (explicitAlternative || !explicitTimesOnly && (!past || EXPLICIT_ALTERNATIVE_RANGE.test(t)))) {
+    return explicitYes(open);
   }
   if (past || refusedGroup && !/^\s*(?:yes|yep|yeah|sure|ok(?:ay)?)\b/.test(t)) return { ...unclear, why: "slot" };
   if (explicitTimesOnly) return unclear;

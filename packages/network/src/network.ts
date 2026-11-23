@@ -1684,7 +1684,7 @@ export class ConsentNetwork implements NetworkUnderTest {
     aw.clarified = true;
     if (aw.kind === "probe") aw.timeChoice = timeChoice;
     this.ctx.log("probe_unclear", { oppId: aw.oppId ?? null, memberId: m.id });
-    this.send(m, text, { type: "question", proactive: false }, "reply");
+    this.send(m, text, { type: "question", proactive: false, ...(aw.oppId ? { proposalId: aw.oppId } : {}) }, "reply");
     return true;
   }
 
@@ -6640,7 +6640,8 @@ export class ConsentNetwork implements NetworkUnderTest {
     const carriesMemberText = kind === "safety" || kind === "relay";
     if (!standaloneNotice && !o.memberInviteLink && !meta.privateInviteVouch && m.pendingInviteJoins?.length && inviteJoinNoticeMayRideReply(directMemberTurn, reply, carriesMemberText, false)) {
       const current: InviteJoinNotice[] = [];
-      const roles = new Set([...(opportunity?.participants ?? []), ...(opportunity?.alternates ?? [])]);
+      const noticeOpportunity = opportunity ?? (o.hook?.t === "times" ? this.opps.get(o.hook.oppId) : undefined);
+      const roles = new Set([...(noticeOpportunity?.participants ?? []), ...(noticeOpportunity?.alternates ?? []), ...(noticeOpportunity?.contacted ?? [])]);
       const roleNames = new Set([...roles].map(id => this.members.get(id)?.first.toLowerCase()));
       for (const notice of m.pendingInviteJoins) {
         const status = this.inviteJoinCopy(m, notice);
