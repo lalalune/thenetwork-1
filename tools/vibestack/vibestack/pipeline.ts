@@ -302,7 +302,7 @@ async function checkLocked(root: string, accept: false | "reviews" | "unproved",
   const models: Model[] = [];
   const machines = new Map<string, Machine>();
   const simulations: { spec: Spec; model: Model; domain: any; simulated: Promise<Simulation> }[] = [];
-  const pending: { weight: number; run: () => Promise<void> }[] = [];
+  const modelQueue: { weight: number; run: () => Promise<void> }[] = [];
 
   for await (const { spec, model, error } of generating(memory, specs)) {
     let domain: any;
@@ -322,7 +322,7 @@ async function checkLocked(root: string, accept: false | "reviews" | "unproved",
     report({ ok: true, stage: "model", summary: `${spec.file}: ${parts.filter(([n]) => n).map((p) => p.join(" ")).join(", ") || "definitions only"}`, detail: "", where: spec.file });
     if (!model.stateType && !model.laws.length && !model.evals.length) continue;
     const simulated = new Promise<Simulation>((resolve, reject) => {
-      pending.push({
+      modelQueue.push({
         weight: model.transitions.length + model.sometimes.length,
         run: () => simulation(memory, spec, specs, model, domain, seed).then(resolve, reject),
       });
@@ -333,11 +333,11 @@ async function checkLocked(root: string, accept: false | "reviews" | "unproved",
 
   // A model can use several tool slots and its guard searches depend on the goal searches.
   // Start models with more transitions and goals early, keeping other models ready to fill idle slots.
-  pending.sort((a, b) => b.weight - a.weight);
+  modelQueue.sort((a, b) => b.weight - a.weight);
   const simulateNext = async () => {
-    for (let next; (next = pending.shift());) await next.run();
+    for (let next; (next = modelQueue.shift());) await next.run();
   };
-  const workers = Array.from({ length: Math.min(pending.length, os.availableParallelism()) }, simulateNext);
+  const workers = Array.from({ length: Math.min(modelQueue.length, os.availableParallelism()) }, simulateNext);
   /** A result about an owner's code names its package; the root's own reads as it always has. */
   const within = (dir: string, r: Result): Result => (dir ? { ...r, summary: `${dir.slice(0, -1)}: ${r.summary}`, where: dir.slice(0, -1) } : r);
   const result = ([ok, stage, summary, detail = "", where]: Reported): Result => ({ ok, stage, summary, detail: ok ? "" : detail, ...(where ? { where } : {}) });
