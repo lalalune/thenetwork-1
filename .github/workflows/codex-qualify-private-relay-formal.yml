@@ -1,0 +1,77 @@
+name: Qualify combined private relay changes
+
+on:
+  push:
+    branches:
+      - codex/qualify-relay-stack-c1c2fe70
+
+permissions:
+  contents: read
+
+jobs:
+  full-check:
+    if: github.repository == 'lalalune/thenetwork-1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      PRODUCT_SOURCE_SHA: c1c2fe703b6329360e40792fbfd4aeb9e1f95243
+      PRODUCT_SOURCE_TREE: 0cc1931e3a98fe057c72d616a5e79ee8b82b43a9
+      REQUIRE_PG: "1"
+      SURPLUS_API_KEY: ""
+      OPENAI_API_KEY: ""
+      BLOOIO_API_KEY: ""
+      TWILIO_AUTH_TOKEN: ""
+      CLOUDFLARE_AI_TOKEN: ""
+      CLOUDFLARE_API_TOKEN: ""
+    services:
+      postgres:
+        image: postgres:16@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
+        env:
+          POSTGRES_USER: runner
+          POSTGRES_DB: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 54339:5432
+        options: >-
+          --health-cmd "pg_isready -U runner"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Verify the candidate and workflow-only child
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git show -s --format=%P HEAD)" = "$PRODUCT_SOURCE_SHA"
+          test "$(git rev-parse "$PRODUCT_SOURCE_SHA^{tree}")" = "$PRODUCT_SOURCE_TREE"
+          test "$(git diff --name-status "$PRODUCT_SOURCE_SHA" HEAD)" = $'A\t.github/workflows/codex-qualify-private-relay-formal.yml'
+          test -z "$(git status --porcelain)"
+          git show -s --format='Qualification commit %H%nProduct source %P%nQualification tree %T'
+          git show -s --format='Product source tree %T' "$PRODUCT_SOURCE_SHA"
+      - uses: ./.github/actions/setup-dafny
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+      - run: npm install --global corepack@0.35.0 && corepack enable pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run spec:setup
+      - name: Install the pinned Quint Rust evaluator
+        uses: ./.github/actions/setup-quint
+      - name: Require the synthetic Postgres service
+        shell: bash
+        run: |
+          bin="$(find /usr/lib/postgresql -mindepth 2 -maxdepth 2 -type d -name bin | sort -V | tail -n 1)"
+          test -x "$bin/pg_ctl"
+          export PATH="$bin:$PATH"
+          echo "$bin" >> "$GITHUB_PATH"
+          "$bin/pg_isready" -h localhost -p 54339
+          node --import tsx scripts/require-pg.ts
+      - name: Run ordinary full Vibestack check
+        run: pnpm run check
+      - name: Verify the check left product source clean
+        shell: bash
+        run: test -z "$(git status --porcelain)"
