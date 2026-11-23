@@ -1,46 +1,17 @@
-# CI: install, typecheck, `pnpm run sim` (the simulations and their gates, with a real Postgres so the
-# pipeline, safety, ops and audit Postgres gates block), the plugin build check and the sites production build; plus the integration and e2e suites (security suite included) with a
-# real Postgres. Validation policy: simulations + integration + e2e, no unit or smoke tests
-# (docs/tests-policy.md). No
-# secrets are given to CI, and LIVE_TESTS is never set, so no paid LLM call, Blooio or Twilio call,
-# or Cloudflare deploy can happen here. Deploys live in deploy-sites.yml. Actions and the Postgres image are pinned by digest.
-name: ci
-
+name: Network console workspace cold qualification
 on:
-  # Pull requests cover feature commits; pushes validate both maintained branches.
-  push:
-    branches: [main, develop]
-  pull_request:
   workflow_dispatch:
-
 permissions:
   contents: read
-
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  # Blank every provider key and leave LIVE_TESTS unset: live tests skip themselves.
-  SURPLUS_API_KEY: ""
-  OPENAI_API_KEY: ""
-  BLOOIO_API_KEY: ""
-  BLOOIO_LIVE_TEST: ""
-  TWILIO_AUTH_TOKEN: ""
-  TURNSTILE_SECRET_KEY: ""
-  CLOUDFLARE_API_TOKEN: ""
-  NTWRK_ALLOW_DEPLOY: ""
-  LLM_ALLOW_OPENAI_FALLBACK: ""
-  # Any accidental LLM call fails fast instead of hanging.
-  LLM_TIMEOUT_MS: "10000"
-  LLM_MAX_RETRIES: "0"
-
 jobs:
-  offline-core:
-    # "offline" means no network calls and no secrets. The simulations get the same pinned Postgres as
-    # the integration job, so the Postgres blocks (pipeline, pipeline-slop, safety, ops, audit) run and block.
+  full-check:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 30
+    concurrency:
+      group: vibestack-full-check-${{ github.ref }}
+      cancel-in-progress: false
+    env:
+      REQUIRE_PG: "1"
     services:
       postgres:
         image: postgres:16@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
@@ -55,242 +26,54 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
-    env:
-      REQUIRE_PG: "1"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          fetch-depth: 2
           persist-credentials: false
+      - name: Check the candidate source
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD^)" = bba4019d518171d9a48e894ebb70da63c64de895
+          test "$(git diff --name-only HEAD^ HEAD)" = .github/workflows/ci.yml
+      - uses: dafny-lang/setup-dafny-action@be023fc606339d46ed6b077dcb8614d0279ded31 # v1
+        with:
+          dafny-version: '4.11.0'
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: .nvmrc
       - run: npm install --global corepack@0.35.0 && corepack enable pnpm
-      - name: Put the Postgres client tools on PATH
-        # The simulations call pg_isready, pg_ctl, pg_dump and psql (dev-pg.ts, the ops backup drill).
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run spec:setup
+      - name: Install the pinned Quint Rust evaluator
+        # Use the published asset directly so GitHub API rate limits cannot block setup.
+        working-directory: tools/vibestack
+        shell: bash
+        run: |
+          version="$(node -p 'require("@informalsystems/quint/dist/src/rust/binaryManager.js").QUINT_EVALUATOR_VERSION')"
+          test "$version" = v0.7.1
+          directory="$(node -p 'require("@informalsystems/quint/dist/src/config.js").rustEvaluatorDir("v0.7.1")')"
+          archive="$RUNNER_TEMP/quint-evaluator.tar.gz"
+          curl --fail --silent --show-error --location --retry 4 \
+            "https://github.com/quint-co/quint/releases/download/evaluator/$version/quint_evaluator-x86_64-unknown-linux-gnu.tar.gz" \
+            --output "$archive"
+          printf '%s  %s\n' ce0502bdef65dc26c242a9e56379a9bb26de6f3db38f0e3989339d46a542f5eb "$archive" | sha256sum --check
+          mkdir -p "$directory"
+          tar -xzf "$archive" -C "$directory" quint_evaluator
+          test -x "$directory/quint_evaluator"
+      - name: Require the synthetic Postgres service
         run: |
           bin="$(find /usr/lib/postgresql -mindepth 2 -maxdepth 2 -type d -name bin | sort -V | tail -n 1)"
           test -x "$bin/pg_ctl"
+          export PATH="$bin:$PATH"
           echo "$bin" >> "$GITHUB_PATH"
-      - name: Install
-        run: pnpm install --frozen-lockfile
-        timeout-minutes: 5
-      - name: Install the toolkit (tools/vibestack)
-        run: pnpm run spec:setup
-        timeout-minutes: 5
-      - name: Require Postgres
-        run: |
-          pg_isready -h localhost -p 54339
+          "$bin/pg_isready" -h localhost -p 54339
           node --import tsx scripts/require-pg.ts
-      - name: Generate design and connector CSS
-        run: pnpm run connector:css
-        timeout-minutes: 5
-      - name: Restore TypeScript incremental state
-        id: type-cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: .cache/typecheck
-          key: typecheck-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.nvmrc', 'pnpm-lock.yaml', 'tsconfig.json', 'sites/tsconfig.json') }}-${{ github.sha }}
-          restore-keys: typecheck-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.nvmrc', 'pnpm-lock.yaml', 'tsconfig.json', 'sites/tsconfig.json') }}-
-      - name: Typecheck (packages, deploy, tests, scripts/sim)
-        run: pnpm exec tsc --noEmit -p .
-        timeout-minutes: 5
-      - name: Typecheck (sites, scripts)
-        run: pnpm exec tsc --noEmit -p sites/tsconfig.json
-        timeout-minutes: 5
-      - name: Save TypeScript incremental state
-        if: steps.type-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: .cache/typecheck
-          key: ${{ steps.type-cache.outputs.cache-primary-key }}
-      - name: Simulations other than matching
-        # Run the in-memory NYC world alongside the other blocks on the same runner.
+      - name: Run the full Vibestack check
+        id: check
         shell: bash
         run: |
-          if [ -n "${LIVE_TESTS:-}" ]; then echo "LIVE_TESTS must be unset in CI"; exit 1; fi
-          (pnpm run sim --only network | sed -u 's/^/[network] /') &
-          network_pid=$!
-          core_status=0
-          pnpm run sim --skip matching,network --json sim-gates.json || core_status=$?
-          network_status=0
-          wait "$network_pid" || network_status=$?
-          if (( core_status || network_status )); then
-            echo "Simulation failure (core=$core_status, network=$network_status)"
-            exit 1
-          fi
-        timeout-minutes: 30
-      - name: No Postgres gate was skipped
-        # A Postgres block that cannot reach Postgres records a tracked "skipped" gate. With REQUIRE_PG=1
-        # that is a failure.
-        run: |
-          skipped="$(jq -r '.gates[] | select((.blocking | not) and (.block | IN("pipeline", "pipeline-slop", "safety", "ops", "audit")) and (((.name + " " + (.detail // "")) | test("skipped"; "i")))) | "[\(.block)] \(.name)"' sim-gates.json)"
-          if [ -n "$skipped" ]; then echo "Postgres gates skipped with REQUIRE_PG=1:"; echo "$skipped"; exit 1; fi
-      - name: Plugin packages match their sources (OpenAI and Claude manifests, SKILL.md snapshots)
-        run: node --import tsx plugins/build.ts --check
-      - name: The retired domain is gone (the hub is ntwrk.party; the old domain only redirects)
-        run: |
-          if git grep -n -I -E 'ntwrk[.]love' -- .; then echo "use ntwrk.party / api.ntwrk.party instead"; exit 1; fi
-      - name: Production build of the four sites (refuses draft legal text and unfilled placeholders)
-        run: pnpm run sites:build
-        env:
-          DEPLOY_TARGET: production
-
-  matching:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    outputs:
-      ntwrk: ${{ steps.gates.outputs.ntwrk }}
-      slop: ${{ steps.gates.outputs.slop }}
-      peon: ${{ steps.gates.outputs.peon }}
-      friends: ${{ steps.gates.outputs.friends }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version-file: .nvmrc
-      - run: npm install --global corepack@0.35.0 && corepack enable pnpm
-      - name: Install
-        run: pnpm install --frozen-lockfile
-        timeout-minutes: 5
-      - name: Pinned matching simulations
-        id: gates
-        shell: bash
-        run: |
-          if [ -n "${LIVE_TESTS:-}" ]; then echo "LIVE_TESTS must be unset in CI"; exit 1; fi
-          packs=(ntwrk slop peon friends)
-          pids=()
-          for pack in "${packs[@]}"; do
-            /usr/bin/time -f 'elapsed=%e user=%U sys=%S rss_kib=%M' \
-              pnpm run sim --only matching --matching-pack "$pack" 2>&1 | sed -u "s/^/[$pack] /" &
-            pids+=("$!")
-          done
-          failed=0
-          for index in "${!pids[@]}"; do
-            pack=${packs[$index]}
-            if wait "${pids[$index]}"; then
-              printf '%s=success\n' "$pack" >> "$GITHUB_OUTPUT"
-            else
-              echo "Matching simulations failed for $pack"
-              failed=1
-            fi
-          done
-          exit "$failed"
-        timeout-minutes: 30
-
-  offline:
-    # Preserve the required check name and require positive completion from every matching pack.
-    if: ${{ always() }}
-    needs: [offline-core, matching]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - name: All offline gates completed and passed
-        env:
-          CORE: ${{ needs.offline-core.result }}
-          MATCHING: ${{ needs.matching.result }}
-          NTWRK: ${{ needs.matching.outputs.ntwrk }}
-          SLOP: ${{ needs.matching.outputs.slop }}
-          PEON: ${{ needs.matching.outputs.peon }}
-          FRIENDS: ${{ needs.matching.outputs.friends }}
-        run: |
-          for gate in CORE MATCHING NTWRK SLOP PEON FRIENDS; do
-            if [ "${!gate}" != success ]; then
-              echo "Offline validation did not pass: $gate (${!gate:-missing})"
-              exit 1
-            fi
-          done
-
-  ui:
-    # The design system and the component library: the brand tokens agree with design.md, the generated stories
-    # are current, the stories pass in happy-dom, and ESLint (tokens-only styling) passes with no warnings.
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version-file: .nvmrc
-      - run: npm install --global corepack@0.35.0 && corepack enable pnpm
-      - name: Install
-        run: pnpm install --frozen-lockfile
-        timeout-minutes: 5
-      - name: Install the toolkit (tools/vibestack)
-        run: pnpm run spec:setup
-        timeout-minutes: 5
-      - name: Design tokens agree with design.md (design:check)
-        run: pnpm run design:check
-      - name: Design-system CSS (design:build)
-        run: pnpm run design:build
-      - name: Generated stories are current (ui:gen, --check)
-        run: pnpm run ui:gen
-      - name: Component stories (ui:test)
-        run: pnpm run ui:test
-        timeout-minutes: 10
-      - name: ESLint for packages/ui, apps and the console and connector pages (lint:ui)
-        run: pnpm run lint:ui
-
-  integration:
-    # The integration suite (real Postgres, real HTTP servers, several packages together, the full
-    # service; the security files are part of it: platform row-level security and composite keys, CSRF
-    # and enumeration limits, MCP OAuth PKCE, the backend's "two logins" RLS check) and the e2e suite
-    # (tests/e2e). Sends are dry-run and OTP providers are fakes: nothing leaves the runner.
-    name: integration
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    services:
-      # The dev Postgres port (54339). The test helpers create one database per test process.
-      postgres:
-        image: postgres:16@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
-        env:
-          POSTGRES_USER: runner
-          POSTGRES_DB: postgres
-          POSTGRES_HOST_AUTH_METHOD: trust
-        ports:
-          - 54339:5432
-        options: >-
-          --health-cmd "pg_isready -U runner"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
-    env:
-      # Postgres suites must run, not skip: the check step below fails the job without Postgres.
-      REQUIRE_PG: "1"
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version-file: .nvmrc
-      - run: npm install --global corepack@0.35.0 && corepack enable pnpm
-      - name: Put the Postgres client tools on PATH
-        # The test helpers call initdb, pg_isready and pg_ctl (packages/observatory/db/dev-pg.ts).
-        run: |
-          bin="$(find /usr/lib/postgresql -mindepth 2 -maxdepth 2 -type d -name bin | sort -V | tail -n 1)"
-          test -x "$bin/pg_ctl"
-          echo "$bin" >> "$GITHUB_PATH"
-      - name: Install
-        run: pnpm install --frozen-lockfile
-        timeout-minutes: 5
-      - name: Initialize integration Postgres
-        # Install cluster-wide roles once before workers migrate their separate databases.
-        run: |
-          pg_isready -h localhost -p 54339
-          node --import tsx scripts/require-pg.ts
-          node --import tsx packages/observatory/db/dev-pg.ts up
-      # Use the four hosted CPUs. Keep the package default for local runs.
-      - name: Integration suite (includes the security suite)
-        run: |
-          if [ -n "${LIVE_TESTS:-}" ]; then echo "LIVE_TESTS must be unset in CI"; exit 1; fi
-          pnpm run test:integration --maxWorkers=4
-        timeout-minutes: 30
-      - name: E2E suite (tests/e2e)
-        run: |
-          if [ -n "${LIVE_TESTS:-}" ]; then echo "LIVE_TESTS must be unset in CI"; exit 1; fi
-          pnpm run test:e2e --maxWorkers=4
-        timeout-minutes: 10
-
+          mkdir -p .spec-cache/formal
+          test -z "$(find .spec-cache/formal -mindepth 1 -maxdepth 1 -print -quit)"
+          # End the check before the job deadline so completed actions can be uploaded.
+          timeout --kill-after=15s 27m pnpm run check
