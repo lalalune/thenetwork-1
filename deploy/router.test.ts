@@ -3,9 +3,10 @@
 //   pnpm exec vitest run deploy
 import { describe, expect, test } from "vitest";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, matchesGlob } from "node:path";
 import { build } from "esbuild";
 import { parse as parseToml } from "smol-toml";
+import { parse as parseYaml } from "yaml";
 import { PROXY_HEADERS, proxySignature, verifyProxyHeaders } from "../packages/platform/src/proxy.ts";
 import { handle, isBackendPath, MAX_BODY_BYTES, RETIRED_SITE_PATHS, RETIRED_SIGNUP_PATHS, RUN_WORKER_FIRST, UNKNOWN_IP, UPDATE_HANDOFF_PATHS, type Env } from "./router.ts";
 
@@ -69,9 +70,16 @@ describe("which paths reach the backend", () => {
     // The built _worker.js exports only the default handler (workerd refuses any other named export:
     // "Incorrect type for map entry 'MAX_BODY_BYTES'" under wrangler pages dev, before the fix).
     const { ROUTER } = await import("../sites/sites.ts");
-    const built = await build({ entryPoints: [ROUTER], bundle: true, write: false, platform: "browser", format: "esm", minify: true });
+    const built = await build({ entryPoints: [ROUTER], bundle: true, write: false, platform: "browser", format: "esm", minify: true, metafile: true });
     const code = built.outputFiles[0]!.text;
     expect([...code.matchAll(/export\s*\{([^}]*)\}/g)].map(m => m[1]!.split(",").map(x => x.trim().split(/\s+as\s+/).at(-1))).flat()).toEqual(["default"]);
+    const workflow = parseYaml(readFileSync(join(import.meta.dirname, "../.github/workflows/deploy-sites.yml"), "utf8")) as { on: Record<string, { paths: string[] }> };
+    const sources = Object.keys(built.metafile!.inputs).filter(input => !input.startsWith("node_modules/"));
+    expect(sources).toContain("deploy/pages-worker.ts");
+    for (const trigger of ["push", "pull_request"]) {
+      const paths = workflow.on[trigger]!.paths;
+      expect(sources.filter(file => !paths.some(pattern => matchesGlob(file, pattern))).sort(), trigger).toEqual([]);
+    }
     for (const s of SITES) {
       const toml = parseToml(readFileSync(join(import.meta.dirname, "../sites", s.domain, "wrangler.toml"), "utf8")) as { name: string; pages_build_output_dir: string; main?: string; assets?: unknown; routes?: unknown; account_id?: string; vars: Record<string, string> };
       expect(toml.name, s.domain).toBe(s.project);
