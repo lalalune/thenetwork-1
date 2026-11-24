@@ -1,0 +1,64 @@
+name: Observatory spec acceptance
+
+on:
+  push:
+    branches: [codex/thenetwork-owner-accept-643]
+
+permissions:
+  contents: read
+
+jobs:
+  accept:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    env:
+      REQUIRE_PG: "1"
+    services:
+      postgres:
+        image: postgres:16@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
+        env:
+          POSTGRES_USER: runner
+          POSTGRES_DB: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 54339:5432
+        options: >-
+          --health-cmd "pg_isready -U runner"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: eliza-research/thenetwork
+          ref: refs/pull/643/head
+          persist-credentials: false
+      - name: Require the reviewed revision
+        run: test "$(git rev-parse HEAD)" = 8b2a75294b5a9443ff4b925c94fdcc8bc24fc89f
+      - uses: ./.github/actions/setup-dafny
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: .nvmrc
+      - run: npm install --global corepack@0.35.0 && corepack enable pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run spec:setup
+      - uses: ./.github/actions/setup-quint
+      - name: Require local synthetic Postgres
+        run: |
+          bin="$(find /usr/lib/postgresql -mindepth 2 -maxdepth 2 -type d -name bin | sort -V | tail -n 1)"
+          test -x "$bin/pg_ctl"
+          echo "$bin" >> "$GITHUB_PATH"
+          "$bin/pg_isready" -h localhost -p 54339
+          node --import tsx scripts/require-pg.ts
+      - name: Record the four reviewed spec path changes
+        run: pnpm run accept
+      - name: Verify acceptance changed only the ledger
+        run: |
+          git diff --check
+          test "$(git diff --name-only)" = spec/lock.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: observatory-review-ledger
+          path: spec/lock.json
+          if-no-files-found: error
+          retention-days: 1
