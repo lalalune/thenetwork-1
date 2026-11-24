@@ -1,0 +1,41 @@
+name: Friends repeat-gate experiment
+on:
+  push:
+    branches: [codex/thenetwork-friends-gate]
+permissions:
+  contents: read
+jobs:
+  paired:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: baseline
+            policy: '{}'
+          - name: repeat-window
+            policy: '{"policy":{"repeatWindowDays":21}}'
+          - name: crew-times
+            policy: '{"policy":{"crewOptions":true}}'
+    env:
+      SURPLUS_API_KEY: ""
+      OPENAI_API_KEY: ""
+      POLICY: ${{ matrix.policy }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: eliza-research/thenetwork
+          ref: 4d46e1db5b790a7e0896c24c0a8535ccb7357038
+          persist-credentials: false
+      - name: Require the same source for each arm
+        run: test "$(git rev-parse HEAD)" = 4d46e1db5b790a7e0896c24c0a8535ccb7357038
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: .nvmrc
+      - run: npm install --global corepack@0.35.0 && corepack enable pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Measure repeat meetings and harm on tuning seeds
+        run: |
+          node --import tsx --conditions eliza-source packages/sim/src/apps/friends/cli.ts \
+            --seeds 1-4 --n 400 --weeks 8 --only pack,random,oracle --pack "$POLICY"
