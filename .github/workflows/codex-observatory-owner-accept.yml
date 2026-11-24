@@ -31,10 +31,10 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: eliza-research/thenetwork
-          ref: refs/pull/643/head
+          ref: c5221bd3be685bdc2a100a9cb1b349721348a29b
           persist-credentials: false
       - name: Require the reviewed revision
-        run: test "$(git rev-parse HEAD)" = 8b2a75294b5a9443ff4b925c94fdcc8bc24fc89f
+        run: test "$(git rev-parse HEAD)" = c5221bd3be685bdc2a100a9cb1b349721348a29b
       - uses: ./.github/actions/setup-dafny
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
