@@ -47,6 +47,7 @@ jobs:
         run: |
           bin="$(find /usr/lib/postgresql -mindepth 2 -maxdepth 2 -type d -name bin | sort -V | tail -n 1)"
           test -x "$bin/pg_ctl"
+          export PATH="$bin:$PATH"
           echo "$bin" >> "$GITHUB_PATH"
           "$bin/pg_isready" -h localhost -p 54339
           node --import tsx scripts/require-pg.ts
